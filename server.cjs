@@ -44,7 +44,7 @@ function buildRuntimeEnv() {
     SUPPORT_EMAIL: cleanEnv(process.env.VITE_SUPPORT_EMAIL) || "",
     WHATSAPP_PHONE_E164: (cleanEnv(process.env.VITE_WHATSAPP_PHONE_E164) || cleanEnv(process.env.WHATSAPP_PHONE_E164) || "").replace(/\D/g, ""),
     VITE_SUMMIT_VOICE_MODE: cleanEnv(process.env.VITE_SUMMIT_VOICE_MODE) || cleanEnv(process.env.SUMMIT_VOICE_MODE) || "realtime",
-    VITE_SPEECH_RECOGNITION_LANG: cleanEnv(process.env.VITE_SPEECH_RECOGNITION_LANG) || cleanEnv(process.env.SPEECH_RECOGNITION_LANG) || "en-US",
+    VITE_SPEECH_RECOGNITION_LANG: cleanEnv(process.env.VITE_SPEECH_RECOGNITION_LANG) || cleanEnv(process.env.SPEECH_RECOGNITION_LANG) || "pt-BR",
     USE_API_PROXY: String(useProxy),
   };
 }
