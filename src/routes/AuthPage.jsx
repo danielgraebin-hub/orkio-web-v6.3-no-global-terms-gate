@@ -68,6 +68,16 @@ const secondaryBtn = {
   background: "#ffffff",
   color: "#0f172a",
 };
+const linkBtn = {
+  border: 0,
+  background: "transparent",
+  padding: 0,
+  margin: 0,
+  color: "#2563eb",
+  fontWeight: 700,
+  cursor: "pointer",
+  textAlign: "left",
+};
 const muted = { color: "#64748b", fontSize: 14, lineHeight: 1.5 };
 
 const adminChip = {
@@ -80,11 +90,43 @@ const adminChip = {
   cursor: "pointer",
 };
 
+const eyeBtn = {
+  position: "absolute",
+  right: 10,
+  top: "50%",
+  transform: "translateY(-50%)",
+  border: 0,
+  background: "transparent",
+  color: "#475569",
+  cursor: "pointer",
+  fontWeight: 700,
+};
+
+function PasswordField({ labelText, placeholder, value, onChange, show, onToggle }) {
+  return (
+    <div>
+      <label style={label}>{labelText}</label>
+      <div style={{ position: "relative" }}>
+        <input
+          style={{ ...input, paddingRight: 64 }}
+          type={show ? "text" : "password"}
+          placeholder={placeholder}
+          value={value}
+          onChange={onChange}
+        />
+        <button type="button" onClick={onToggle} style={eyeBtn}>
+          {show ? "Hide" : "Show"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function AuthPage() {
   const nav = useNavigate();
   const [tenant] = useState("public");
 
-  const [mode, setMode] = useState("register"); // register | login
+  const [mode, setMode] = useState("register"); // register | login | forgot | reset
   const [otpMode, setOtpMode] = useState(false);
 
   const [name, setName] = useState("");
@@ -96,6 +138,13 @@ export default function AuthPage() {
 
   const [otpCode, setOtpCode] = useState("");
   const [pendingEmail, setPendingEmail] = useState("");
+  const [resetToken, setResetToken] = useState("");
+
+  const [showPassword, setShowPassword] = useState(false);
+  const [showPasswordConfirm, setShowPasswordConfirm] = useState(false);
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [showResetPasswordConfirm, setShowResetPasswordConfirm] = useState(false);
 
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -122,8 +171,14 @@ export default function AuthPage() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const requestedMode = (params.get("mode") || "").toLowerCase();
+    const tokenFromUrl = params.get("token") || "";
     if (requestedMode === "login" || requestedMode === "signin") {
       setMode("login");
+    } else if (requestedMode === "forgot") {
+      setMode("forgot");
+    } else if (requestedMode === "reset") {
+      setMode("reset");
+      setResetToken(tokenFromUrl);
     }
 
     if (params.get("accepted_terms") === "1" || getPendingTermsAccepted()) {
@@ -141,7 +196,10 @@ export default function AuthPage() {
 
   const title = useMemo(() => {
     if (otpMode) return "Verify your access code";
-    return mode === "login" ? "Sign in to your account" : "Create your account";
+    if (mode === "login") return "Sign in to your account";
+    if (mode === "forgot") return "Recover your password";
+    if (mode === "reset") return "Create a new password";
+    return "Create your account";
   }, [otpMode, mode]);
 
   const subtitle = useMemo(() => {
@@ -150,6 +208,12 @@ export default function AuthPage() {
     }
     if (mode === "login") {
       return "Sign in with your email and password. If required, we will send a one-time code to complete access.";
+    }
+    if (mode === "forgot") {
+      return "Enter your email and we will send a password reset link if the account exists.";
+    }
+    if (mode === "reset") {
+      return "Set your new password to recover access to the console.";
     }
     return "Register, verify your email with OTP, and continue straight into the console.";
   }, [otpMode, mode]);
@@ -169,6 +233,10 @@ export default function AuthPage() {
     setStatus("");
     const url = new URL(window.location.href);
     url.searchParams.set("mode", nextMode);
+    if (nextMode !== "reset") {
+      url.searchParams.delete("token");
+      setResetToken("");
+    }
     window.history.replaceState({}, "", `${url.pathname}${url.search}`);
   }
 
@@ -176,7 +244,19 @@ export default function AuthPage() {
     nav("/admin");
   }
 
-  
+  async function fetchCurrentTermsVersion() {
+    try {
+      const { data } = await apiFetch("/api/public/legal/terms-version", {
+        method: "GET",
+        org: tenant,
+        skipAuthRedirect: true,
+      });
+      return data?.terms_version || data?.version || getAcceptedTermsVersion() || null;
+    } catch {
+      return getAcceptedTermsVersion() || null;
+    }
+  }
+
   async function finalizeSession(data, resolvedTenant) {
     const nextTenant = resolvedTenant || tenant || "public";
     setTenant(nextTenant);
@@ -214,7 +294,6 @@ export default function AuthPage() {
     sessionStorage.removeItem("post_auth_redirect");
     nav(next, { replace: true });
   }
-
 
   async function doRegister() {
     if (busy) return;
@@ -286,7 +365,7 @@ export default function AuthPage() {
         setPendingEmail(loginData.email || emailNormalized);
         setStatus(
           loginData.message ||
-          "OTP sent. Verify it to enter the console."
+            "OTP sent. Verify it to enter the console."
         );
         return;
       }
@@ -352,6 +431,72 @@ export default function AuthPage() {
     }
   }
 
+  async function doForgotPassword() {
+    if (busy) return;
+    const emailNormalized = normalizeEmail(email);
+    if (!emailNormalized) {
+      setStatus("Please enter your email.");
+      return;
+    }
+    setBusy(true);
+    setStatus("Sending reset link...");
+    try {
+      const { data } = await apiFetch("/api/auth/forgot-password", {
+        method: "POST",
+        org: tenant,
+        body: {
+          tenant,
+          email: emailNormalized,
+        },
+      });
+      setStatus(data?.message || "If the account exists, a reset link has been sent.");
+    } catch (err) {
+      setStatus(err?.message || "Unable to request password reset.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doResetPassword() {
+    if (busy) return;
+
+    if (!resetToken) {
+      setStatus("Missing reset token.");
+      return;
+    }
+    if (password !== passwordConfirm) {
+      setStatus("Passwords do not match.");
+      return;
+    }
+    if (!password || !passwordConfirm) {
+      setStatus("Please fill both password fields.");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Updating your password...");
+    try {
+      const { data } = await apiFetch("/api/auth/reset-password", {
+        method: "POST",
+        org: tenant,
+        body: {
+          tenant,
+          token: resetToken,
+          password,
+          password_confirm: passwordConfirm,
+        },
+      });
+      setStatus(data?.message || "Password updated. You can sign in now.");
+      setPassword("");
+      setPasswordConfirm("");
+      setAuthMode("login");
+    } catch (err) {
+      setStatus(err?.message || "Unable to reset password.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function doVerifyOtp() {
     if (busy) return;
 
@@ -411,24 +556,26 @@ export default function AuthPage() {
 
         {!otpMode ? (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 18 }}>
-              <button
-                type="button"
-                style={mode === "register" ? btn : secondaryBtn}
-                onClick={() => setAuthMode("register")}
-                disabled={busy}
-              >
-                Create account
-              </button>
-              <button
-                type="button"
-                style={mode === "login" ? btn : secondaryBtn}
-                onClick={() => setAuthMode("login")}
-                disabled={busy}
-              >
-                Sign in
-              </button>
-            </div>
+            {mode !== "forgot" && mode !== "reset" ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 18 }}>
+                <button
+                  type="button"
+                  style={mode === "register" ? btn : secondaryBtn}
+                  onClick={() => setAuthMode("register")}
+                  disabled={busy}
+                >
+                  Create account
+                </button>
+                <button
+                  type="button"
+                  style={mode === "login" ? btn : secondaryBtn}
+                  onClick={() => setAuthMode("login")}
+                  disabled={busy}
+                >
+                  Sign in
+                </button>
+              </div>
+            ) : null}
 
             {mode === "register" ? (
               <div style={{ display: "grid", gap: 14 }}>
@@ -443,14 +590,22 @@ export default function AuthPage() {
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                  <div>
-                    <label style={label}>Password</label>
-                    <input style={input} type="password" placeholder="Your password" value={password} onChange={(e) => setPassword(e.target.value)} />
-                  </div>
-                  <div>
-                    <label style={label}>Confirm password</label>
-                    <input style={input} type="password" placeholder="Repeat your password" value={passwordConfirm} onChange={(e) => setPasswordConfirm(e.target.value)} />
-                  </div>
+                  <PasswordField
+                    labelText="Password"
+                    placeholder="Your password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    show={showPassword}
+                    onToggle={() => setShowPassword((v) => !v)}
+                  />
+                  <PasswordField
+                    labelText="Confirm password"
+                    placeholder="Repeat your password"
+                    value={passwordConfirm}
+                    onChange={(e) => setPasswordConfirm(e.target.value)}
+                    show={showPasswordConfirm}
+                    onToggle={() => setShowPasswordConfirm((v) => !v)}
+                  />
                 </div>
 
                 <div>
@@ -472,23 +627,81 @@ export default function AuthPage() {
                   {busy ? "Processing..." : "Create account and receive OTP"}
                 </button>
               </div>
-            ) : (
+            ) : null}
+
+            {mode === "login" ? (
               <div style={{ display: "grid", gap: 14 }}>
                 <div>
                   <label style={label}>Email</label>
                   <input style={input} placeholder="you@company.com" value={email} onChange={(e) => setEmail(e.target.value)} />
                 </div>
 
-                <div>
-                  <label style={label}>Password</label>
-                  <input style={input} type="password" placeholder="Your password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                <PasswordField
+                  labelText="Password"
+                  placeholder="Your password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  show={showLoginPassword}
+                  onToggle={() => setShowLoginPassword((v) => !v)}
+                />
+
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                  <button type="button" style={linkBtn} onClick={() => setAuthMode("forgot")}>
+                    Forgot password?
+                  </button>
                 </div>
 
                 <button style={btn} disabled={busy} onClick={doLogin}>
                   {busy ? "Processing..." : "Sign in"}
                 </button>
               </div>
-            )}
+            ) : null}
+
+            {mode === "forgot" ? (
+              <div style={{ display: "grid", gap: 14 }}>
+                <div>
+                  <label style={label}>Email</label>
+                  <input style={input} placeholder="you@company.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+                </div>
+                <button style={btn} disabled={busy} onClick={doForgotPassword}>
+                  {busy ? "Processing..." : "Send reset link"}
+                </button>
+                <button type="button" style={secondaryBtn} disabled={busy} onClick={() => setAuthMode("login")}>
+                  Back to sign in
+                </button>
+              </div>
+            ) : null}
+
+            {mode === "reset" ? (
+              <div style={{ display: "grid", gap: 14 }}>
+                <div>
+                  <label style={label}>Reset token</label>
+                  <input style={input} placeholder="Paste your reset token" value={resetToken} onChange={(e) => setResetToken(e.target.value)} />
+                </div>
+                <PasswordField
+                  labelText="New password"
+                  placeholder="Your new password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  show={showResetPassword}
+                  onToggle={() => setShowResetPassword((v) => !v)}
+                />
+                <PasswordField
+                  labelText="Confirm new password"
+                  placeholder="Repeat your new password"
+                  value={passwordConfirm}
+                  onChange={(e) => setPasswordConfirm(e.target.value)}
+                  show={showResetPasswordConfirm}
+                  onToggle={() => setShowResetPasswordConfirm((v) => !v)}
+                />
+                <button style={btn} disabled={busy} onClick={doResetPassword}>
+                  {busy ? "Processing..." : "Update password"}
+                </button>
+                <button type="button" style={secondaryBtn} disabled={busy} onClick={() => setAuthMode("login")}>
+                  Back to sign in
+                </button>
+              </div>
+            ) : null}
           </>
         ) : (
           <div style={{ display: "grid", gap: 14 }}>
@@ -511,6 +724,7 @@ export default function AuthPage() {
                 setOtpMode(false);
                 setOtpCode("");
                 setStatus("");
+                setAuthMode("login");
               }}
             >
               Back
@@ -525,15 +739,12 @@ export default function AuthPage() {
               borderRadius: 16,
               padding: "12px 14px",
               fontSize: 14,
-              background: status.toLowerCase().includes("failed") || status.toLowerCase().includes("invalid")
+              background: status.toLowerCase().includes("failed") || status.toLowerCase().includes("invalid") || status.toLowerCase().includes("unable")
                 ? "rgba(239,68,68,0.10)"
-                : "rgba(37,99,235,0.08)",
-              color: status.toLowerCase().includes("failed") || status.toLowerCase().includes("invalid")
+                : "rgba(37,99,235,0.10)",
+              color: status.toLowerCase().includes("failed") || status.toLowerCase().includes("invalid") || status.toLowerCase().includes("unable")
                 ? "#991b1b"
-                : "#1e3a8a",
-              border: status.toLowerCase().includes("failed") || status.toLowerCase().includes("invalid")
-                ? "1px solid rgba(239,68,68,0.25)"
-                : "1px solid rgba(37,99,235,0.18)",
+                : "#1d4ed8",
             }}
           >
             {status}
