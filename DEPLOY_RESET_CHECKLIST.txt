@@ -1,0 +1,8 @@
+Orkio Web Reset Deploy Checklist
+
+1. npm install
+2. npm run build
+3. Validar /src/main.jsx como entrypoint
+4. Validar login, /app e /admin
+5. Testar mic, TTS e ciclo V2V
+6. Confirmar que não há duplicação de listeners

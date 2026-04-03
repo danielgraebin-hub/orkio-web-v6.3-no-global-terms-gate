@@ -1,0 +1,1 @@
+Patch v6.2: fixes legal static routes and terms acceptance before login by deferring backend sync until authenticated.

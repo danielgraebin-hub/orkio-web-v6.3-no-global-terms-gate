@@ -1,0 +1,9 @@
+PATCH V6.3 TERMS GATE REMOVAL
+
+Changes:
+- Removed global <TermsModal />, <OnboardingModal />, and <PWAInstallPrompt /> mounting from src/main.jsx and src/src_main.jsx.
+- Terms acceptance remains in registration flow on /auth.
+- Terms modal still exists inside AppConsole for authenticated legacy users without terms_accepted_at.
+
+Reason:
+- Global mounting forced Acceptance Required before login/register flow, causing the app to stall on /auth and only hit /api/public/legal/terms-version.
