@@ -1889,8 +1889,10 @@ function scheduleRealtimeIdleFollowup() {
           const ev = JSON.parse(e.data);
 
                     // Turn arming + optional Magic Words (B3)
-          // We DO NOT auto-respond (create_response=false). We arm the turn on final transcript and
-          // only create a response when the user clicks, presses a hotkey, or speaks a magic word.
+          // server_vad + create_response=true is the source of truth.
+          // We do not auto-fire response.create on final transcript here; we wait for the server
+          // to emit the response events, while still allowing optional manual / magic-word triggers
+          // when explicitly requested by the user.
           if (ev?.type === 'conversation.item.input_audio_transcription.completed') {
             const raw = (ev?.transcript || ev?.text || ev?.result?.transcript || '').toString();
             queueRealtimeEvent({ event_type: 'transcript.final', role: 'user', content: raw, is_final: true });
@@ -1914,12 +1916,10 @@ function scheduleRealtimeIdleFollowup() {
                   console.warn('[Realtime] magic trigger failed', err);
                 }
               } else if (raw.trim()) {
-                if (REALTIME_AUTO_RESPONSE_ENABLED) {
-                  triggerRealtimeResponse("auto_vad");
-                } else {
-                  setUploadStatus('Ready to respond — click ▶️ or press Space/Enter.');
-                  setTimeout(() => setUploadStatus(''), 1800);
-                }
+                setRtcReadyToRespond(false);
+                logRealtimeStep('runtime:awaiting_server_auto_response', {
+                  transcript: raw,
+                });
               }
             });
           }
@@ -1949,7 +1949,10 @@ function scheduleRealtimeIdleFollowup() {
             const t = (rtcTextBufRef.current || '').trim();
             rtcTextBufRef.current = '';
             rtcAudioTranscriptBufRef.current = '';
-            commitRealtimeAssistantFinal(t, { source: 'response.text.done' });
+            if (t && !rtcAssistantFinalCommittedRef.current) {
+              logRealtimeStep('runtime:response_finalized', { source: 'response.text.done', finalText: t });
+              commitRealtimeAssistantFinal(t, { source: 'response.text.done' });
+            }
           }
           // Audio transcript (when model outputs audio without text)
           if (ev?.type === 'response.audio.delta') {
@@ -1998,6 +2001,8 @@ function scheduleRealtimeIdleFollowup() {
             } else {
               logRealtimeStep('runtime:response_done_without_text', {
                 source: 'response.done',
+                textBuf: (rtcTextBufRef.current || '').length,
+                audioTranscriptBuf: (rtcAudioTranscriptBufRef.current || '').length,
               });
             }
           }
