@@ -1888,13 +1888,12 @@ function scheduleRealtimeIdleFollowup() {
         try {
           const ev = JSON.parse(e.data);
 
-                    // Turn arming + optional Magic Words (B3)
-          // We DO NOT auto-respond (create_response=false). We arm the turn on final transcript and
-          // only create a response when the user clicks, presses a hotkey, or speaks a magic word.
+          // Turn arming + optional Magic Words (B3)
+          // Com server_vad + create_response=true, a resposta pode ser gerada automaticamente
+          // pelo modelo. Ainda assim mantemos o gatilho manual/magic para compatibilidade.
           if (ev?.type === 'conversation.item.input_audio_transcription.completed') {
             const raw = (ev?.transcript || ev?.text || ev?.result?.transcript || '').toString();
             queueRealtimeEvent({ event_type: 'transcript.final', role: 'user', content: raw, is_final: true });
-            try {} catch {}
             rtcLastFinalTranscriptRef.current = raw;
             markRealtimeUserActivity();
 
@@ -1923,11 +1922,8 @@ function scheduleRealtimeIdleFollowup() {
               }
             });
           }
-// Basic telemetry + optional live captions
-          if (ev?.type === 'response.text.delta' && ev?.delta) {
-            clearRealtimeResponseTimeout();
-            rtcTextBufRef.current += ev.delta;
-          }
+
+          // Basic telemetry + optional live captions
           if (ev?.type === 'response.created') {
             clearRealtimeResponseTimeout();
             rtcResponseInFlightRef.current = true;
@@ -1936,36 +1932,80 @@ function scheduleRealtimeIdleFollowup() {
             rtcAudioTranscriptBufRef.current = '';
             rtcLastAssistantFinalRef.current = '';
             rtcAssistantFinalCommittedRef.current = false;
+            logRealtimeStep('runtime:response_created', ev);
           }
+
           if (ev?.type === 'response.output_item.added') {
             clearRealtimeResponseTimeout();
           }
+
+          if (ev?.type === 'response.output_item.done') {
+            clearRealtimeResponseTimeout();
+            logRealtimeStep('runtime:response_output_item_done', ev);
+          }
+
           if (ev?.type === 'response.content_part.added') {
             clearRealtimeResponseTimeout();
           }
+
+          if (ev?.type === 'response.text.delta' && ev?.delta) {
+            clearRealtimeResponseTimeout();
+            rtcTextBufRef.current += ev.delta;
+          }
+
           if (ev?.type === 'response.text.done') {
             clearRealtimeResponseTimeout();
             rtcResponseInFlightRef.current = false;
             const t = (rtcTextBufRef.current || '').trim();
             rtcTextBufRef.current = '';
             rtcAudioTranscriptBufRef.current = '';
-            commitRealtimeAssistantFinal(t, { source: 'response.text.done' });
+            if (t && !rtcAssistantFinalCommittedRef.current) {
+              logRealtimeStep('runtime:response_text_done', { textLength: t.length });
+              commitRealtimeAssistantFinal(t, { source: 'response.text.done' });
+            }
           }
+
           // Audio transcript (when model outputs audio without text)
           if (ev?.type === 'response.audio.delta') {
             clearRealtimeResponseTimeout();
           }
+
           if (ev?.type === 'response.audio_transcript.delta' && ev?.delta) {
             clearRealtimeResponseTimeout();
             rtcAudioTranscriptBufRef.current = (rtcAudioTranscriptBufRef.current || '') + ev.delta;
           }
+
           if (ev?.type === 'response.audio_transcript.done' || ev?.type === 'response.audio_transcript.final') {
             clearRealtimeResponseTimeout();
             rtcResponseInFlightRef.current = false;
             const at = ((rtcAudioTranscriptBufRef.current || '') + (ev?.transcript || '')).trim();
             rtcAudioTranscriptBufRef.current = '';
-            if (!rtcAssistantFinalCommittedRef.current) {
+            if (at && !rtcAssistantFinalCommittedRef.current) {
+              logRealtimeStep('runtime:response_audio_transcript_done', { textLength: at.length, source: ev?.type });
               commitRealtimeAssistantFinal(at, { source: 'response.audio_transcript' });
+            }
+          }
+
+          // FINALIZAÇÃO CANÔNICA DO TURNO
+          if (ev?.type === 'response.done') {
+            clearRealtimeResponseTimeout();
+            rtcResponseInFlightRef.current = false;
+
+            const finalText =
+              (rtcTextBufRef.current || '').trim() ||
+              ((rtcAudioTranscriptBufRef.current || '') + (ev?.transcript || '')).trim() ||
+              '';
+
+            rtcTextBufRef.current = '';
+            rtcAudioTranscriptBufRef.current = '';
+
+            logRealtimeStep('runtime:response_done', {
+              hasText: !!finalText,
+              textLength: finalText.length,
+            });
+
+            if (finalText && !rtcAssistantFinalCommittedRef.current) {
+              commitRealtimeAssistantFinal(finalText, { source: 'response.done' });
             }
           }
 
@@ -1978,7 +2018,13 @@ function scheduleRealtimeIdleFollowup() {
             setV2vPhase('error');
             void activateSilentRealtimeFallback('realtime_error', { disarm: false });
           }
-        } catch {}
+        } catch (err) {
+          console.warn('[Realtime] DataChannel handler error', err, e?.data);
+          logRealtimeStep('runtime:dc_message_parse_error', {
+            message: err?.message || null,
+            raw: e?.data || null,
+          });
+        }
       });
 
       // SDP handshake
