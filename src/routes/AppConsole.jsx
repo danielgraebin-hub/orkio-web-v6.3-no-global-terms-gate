@@ -510,6 +510,8 @@ const rtcLastUserActivityAtRef = useRef(0);
   const rtcThreadIdRef = useRef(null);
   const rtcEventQueueRef = useRef([]);
   const rtcFlushTimerRef = useRef(null);
+  const rtcLivePollTimerRef = useRef(null);
+  const rtcSeenBackendResponseIdsRef = useRef(new Set());
   const rtcConnectingRef = useRef(false);
   // PATCH0100_27_2B: UI log + punct status
   const [rtcAuditEvents, setRtcAuditEvents] = useState([]);
@@ -1746,9 +1748,10 @@ function scheduleRealtimeIdleFollowup() {
       }
 
       rtcEventQueueRef.current = [];
+      rtcSeenBackendResponseIdsRef.current = new Set();
       if (rtcFlushTimerRef.current) { try { clearInterval(rtcFlushTimerRef.current); } catch {} }
       rtcFlushTimerRef.current = setInterval(() => { try { flushRealtimeEvents(); } catch {} }, 400);
-
+      startRealtimeLivePoll();
 
       const pc = new RTCPeerConnection();
       rtcPcRef.current = pc;
@@ -2153,12 +2156,109 @@ function scheduleRealtimeIdleFollowup() {
   }
 
 
+
+  function clearRealtimeLivePoll() {
+    if (rtcLivePollTimerRef.current) {
+      try { clearInterval(rtcLivePollTimerRef.current); } catch {}
+      rtcLivePollTimerRef.current = null;
+    }
+  }
+
+  function safeParseRealtimeMeta(meta) {
+    if (!meta) return {};
+    if (typeof meta === "object") return meta;
+    try { return JSON.parse(meta); } catch { return {}; }
+  }
+
+  async function handleBackendRealtimeAssistantResponses(payload) {
+    const sid = rtcSessionIdRef.current;
+    if (!sid) return;
+
+    const events = Array.isArray(payload?.events) ? payload.events : [];
+    if (events.length) {
+      setRtcAuditEvents(events);
+    }
+
+    const candidateEvents = events.filter((ev) => {
+      const eventType = String(ev?.event_type || "").trim();
+      const speakerType = String(ev?.speaker_type || ev?.role || "").trim().toLowerCase();
+      return (
+        (eventType === "response.final" || eventType === "transcript.final")
+        && speakerType === "agent"
+      );
+    });
+
+    for (const ev of candidateEvents) {
+      const evId = String(ev?.id || "");
+      if (!evId || rtcSeenBackendResponseIdsRef.current.has(evId)) continue;
+
+      const meta = safeParseRealtimeMeta(ev?.meta);
+      const content =
+        String(
+          ev?.transcript_punct ||
+          ev?.transcript_raw ||
+          ev?.content ||
+          ""
+        ).trim();
+
+      if (!content) continue;
+
+      rtcSeenBackendResponseIdsRef.current.add(evId);
+
+      const agentName = String(ev?.agent_name || meta?.agent_name || "Orkio").trim() || "Orkio";
+      const agentId = ev?.agent_id || ev?.speaker_id || meta?.agent_id || null;
+
+      setMessages((prev) => {
+        const exists = (prev || []).some((m) => String(m?.id || "") === evId);
+        if (exists) return prev;
+        return (prev || []).concat([{
+          id: evId,
+          role: "assistant",
+          content,
+          agent_id: agentId ? String(agentId) : null,
+          agent_name: agentName,
+          created_at: Math.floor(Date.now() / 1000),
+        }]);
+      });
+
+      setUploadStatus(`📝 ${agentName}: ${content.slice(0, 80)}${content.length > 80 ? '…' : ''}`);
+      setTimeout(() => setUploadStatus(''), 2200);
+
+      try {
+        await playTts(content, agentId, {
+          forceAuto: true,
+          messageId: evId,
+          traceId: v2vTraceRef.current || null,
+        });
+      } catch (err) {
+        console.warn("[Realtime] backend response TTS failed", err);
+      }
+    }
+  }
+
+  function startRealtimeLivePoll() {
+    clearRealtimeLivePoll();
+    const sid = rtcSessionIdRef.current;
+    if (!sid) return;
+
+    rtcLivePollTimerRef.current = setInterval(async () => {
+      try {
+        if (!realtimeModeRef.current || !rtcSessionIdRef.current) return;
+        const data = await getRealtimeSession({ session_id: sid, finals_only: true });
+        await handleBackendRealtimeAssistantResponses(data || {});
+      } catch (err) {
+        console.warn("[Realtime] live poll failed", err);
+      }
+    }, 1400);
+  }
+
   // PATCH0100_27_2B: finalize session on server + poll punctuated finals (best-effort)
   async function finalizeRealtimeSession(reason = 'client_stop') {
     const sid = rtcSessionIdRef.current;
     if (!sid) return;
-    // stop timer
+    // stop timers
     if (rtcFlushTimerRef.current) { try { clearInterval(rtcFlushTimerRef.current); } catch {} rtcFlushTimerRef.current = null; }
+    clearRealtimeLivePoll();
     // flush pending events
     try { await flushRealtimeEvents(); } catch {}
     // end session (best-effort)
@@ -2177,6 +2277,7 @@ function scheduleRealtimeIdleFollowup() {
           if (data?.events) {
             setRtcAuditEvents(data.events);
           }
+          await handleBackendRealtimeAssistantResponses(data || {});
           if (data?.punct?.done) {
             setRtcPunctStatus('done');
             return;
@@ -2204,7 +2305,8 @@ function scheduleRealtimeIdleFollowup() {
     queueRealtimeEvent({ event_type: 'response.final', role: 'assistant', content: finalText, is_final: true, meta: { source } });
     try {
       const selectedAgentObj2 = (agents || []).find(a => String(a.id) === String(destSingle || ""));
-      const agentName2 = selectedAgentObj2?.name || "Orkio";
+      const metaAgentName = source && String(source).includes(":") ? String(source).split(":")[1].trim() : "";
+      const agentName2 = metaAgentName || selectedAgentObj2?.name || "Orkio";
       const agentId2 = selectedAgentObj2?.id || (destSingle || null);
       const mid = `rtc_ass_${Date.now()}_${Math.random().toString(16).slice(2)}`;
       setMessages((prev) => prev.concat([{
@@ -2261,6 +2363,7 @@ async function stopRealtime(reason = 'client_stop') {
       clearRealtimeIdleFollowup();
       rtcFallbackActiveRef.current = false;
       if (rtcFlushTimerRef.current) { try { clearInterval(rtcFlushTimerRef.current); } catch {} rtcFlushTimerRef.current = null; }
+      clearRealtimeLivePoll();
 
       try {
         if (sid) {
@@ -2269,6 +2372,7 @@ async function stopRealtime(reason = 'client_stop') {
           try {
             const data = await getRealtimeSession({ session_id: sid, finals_only: true });
             if (data?.events) setRtcAuditEvents(data.events);
+            await handleBackendRealtimeAssistantResponses(data || {});
           } catch {}
           try {
             if (summitRuntimeModeRef.current === "summit") {
@@ -2306,6 +2410,7 @@ async function stopRealtime(reason = 'client_stop') {
       rtcAssistantFinalCommittedRef.current = false;
       rtcLastAssistantFinalRef.current = '';
       rtcResponseInFlightRef.current = false;
+      rtcSeenBackendResponseIdsRef.current = new Set();
 
       const processing = rtcAudioProcessingRef.current;
       rtcAudioProcessingRef.current = null;
@@ -2542,10 +2647,12 @@ async function stopRealtime(reason = 'client_stop') {
       setUploadStatus("Enviando arquivo...");
 
       if (uploadScope === "thread") {
+        console.info("[Upload] start", { scope: "thread", filename: f?.name, threadId: effectiveThreadId, size: f?.size || null });
         await uploadFile(f, { token, org: tenant, threadId: effectiveThreadId, intent: "chat" });
         setUploadStatus("Arquivo anexado à conversa ✅");
         try { await loadMessages(effectiveThreadId); } catch {}
       } else if (uploadScope === "agents") {
+        console.info("[Upload] start", { scope: "agents", filename: f?.name, agentIds: uploadAgentIds, size: f?.size || null });
         if (!uploadAgentIds.length) {
           alert("Selecione ao menos um agente.");
           return;
@@ -2553,6 +2660,7 @@ async function stopRealtime(reason = 'client_stop') {
         await uploadFile(f, { token, org: tenant, agentIds: uploadAgentIds, intent: "agent" });
         setUploadStatus("Arquivo vinculado aos agentes ✅");
       } else if (uploadScope === "institutional") {
+        console.info("[Upload] start", { scope: "institutional", filename: f?.name, threadId: effectiveThreadId, size: f?.size || null });
         const admin = isAdmin(user);
         if (admin) {
           await uploadFile(f, { token, org: tenant, threadId: effectiveThreadId, intent: "institutional", linkAllAgents: true });
@@ -2574,6 +2682,11 @@ async function stopRealtime(reason = 'client_stop') {
       setTimeout(() => setUploadStatus(""), 2200);
     } catch (e) {
       console.error("upload error", e);
+      console.warn("[Upload] failed", {
+        scope: uploadScope,
+        filename: f?.name || uploadFileObj?.name || null,
+        message: e?.message || null,
+      });
       setUploadStatus(e?.message || "Falha no upload");
       setTimeout(() => setUploadStatus(""), 2500);
     } finally {
