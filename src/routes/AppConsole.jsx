@@ -123,6 +123,33 @@ function resolveRealtimeIdleDisplayName(userObj) {
   return first.replace(/[^\p{L}\p{N}]/gu, "") || "";
 }
 
+
+function normalizeAgentVoiceId(raw, fallback = "cedar") {
+  const voice = String(raw || "").trim().toLowerCase();
+  const aliases = {
+    marine: "marin",
+    marin: "marin",
+    nova: "cedar",
+    onyx: "echo",
+    fable: "sage",
+  };
+  const valid = new Set(["alloy","ash","ballad","cedar","coral","echo","fable","marin","nova","onyx","sage","shimmer","verse"]);
+  const normalized = aliases[voice] || voice;
+  return valid.has(normalized) ? normalized : (String(fallback || "cedar").trim().toLowerCase() || "cedar");
+}
+
+function resolveAgentVoice(agentLike) {
+  const name = String(agentLike?.agent_name || agentLike?.name || "").trim().toLowerCase();
+  const dbVoice = String(agentLike?.voice_id || "").trim();
+  const envMap = {
+    orkio: (window.__ORKIO_ENV__?.VITE_ORKIO_VOICE_ID || import.meta.env.VITE_ORKIO_VOICE_ID || "").trim(),
+    chris: (window.__ORKIO_ENV__?.VITE_CHRIS_VOICE_ID || import.meta.env.VITE_CHRIS_VOICE_ID || "").trim(),
+    orion: (window.__ORKIO_ENV__?.VITE_ORION_VOICE_ID || import.meta.env.VITE_ORION_VOICE_ID || "").trim(),
+  };
+  const defaultVoice = (window.__ORKIO_ENV__?.VITE_REALTIME_VOICE || import.meta.env.VITE_REALTIME_VOICE || "cedar").trim() || "cedar";
+  return normalizeAgentVoiceId(dbVoice || envMap[name] || defaultVoice, defaultVoice);
+}
+
 function logRealtimeStep(step, payload = undefined) {
   try {
     const stamp = new Date().toISOString();
@@ -1082,7 +1109,7 @@ useEffect(() => {
 
       // PATCH0100_14: store agent info from response
       if (resp?.data) {
-        const ai = { agent_id: resp.data.agent_id, agent_name: resp.data.agent_name, voice_id: resp.data.voice_id, avatar_url: resp.data.avatar_url };
+        const ai = { agent_id: resp.data.agent_id, agent_name: resp.data.agent_name, voice_id: resolveAgentVoice({ agent_name: resp.data.agent_name, voice_id: resp.data.voice_id }), avatar_url: resp.data.avatar_url };
         setLastAgentInfo(ai);
         if (resp.data.runtime_hints) setRuntimeHints(resp.data.runtime_hints || null);
         if (resp.data.trace_id) setLastTraceId(resp.data.trace_id);
@@ -2207,6 +2234,10 @@ function scheduleRealtimeIdleFollowup() {
 
       const agentName = String(ev?.agent_name || meta?.agent_name || "Orkio").trim() || "Orkio";
       const agentId = ev?.agent_id || ev?.speaker_id || meta?.agent_id || null;
+      const resolvedVoice = resolveAgentVoice({
+        agent_name: agentName,
+        voice_id: ev?.voice_id || meta?.voice_id || null,
+      });
 
       setMessages((prev) => {
         const exists = (prev || []).some((m) => String(m?.id || "") === evId);
@@ -2217,6 +2248,7 @@ function scheduleRealtimeIdleFollowup() {
           content,
           agent_id: agentId ? String(agentId) : null,
           agent_name: agentName,
+          voice_id: resolvedVoice,
           created_at: Math.floor(Date.now() / 1000),
         }]);
       });
@@ -2227,8 +2259,9 @@ function scheduleRealtimeIdleFollowup() {
       try {
         await playTts(content, agentId, {
           forceAuto: true,
-          messageId: evId,
+          messageId: null,
           traceId: v2vTraceRef.current || null,
+          voiceOverride: resolvedVoice,
         });
       } catch (err) {
         console.warn("[Realtime] backend response TTS failed", err);
@@ -2483,7 +2516,7 @@ async function stopRealtime(reason = 'client_stop') {
 
   async function playTts(textToSpeak, agentId, opts = {}) {
     // F-01 FIX: desestruturar opts no início da função
-    const { forceAuto = false, messageId = null, traceId = null } = opts || {};
+    const { forceAuto = false, messageId = null, traceId = null, voiceOverride = null } = opts || {};
     if (!textToSpeak || textToSpeak.length < 2) return;
     // Evitar reler a mesma mensagem (idempotência)
     if (messageId && messageId === lastSpokenMessageIdRef.current) return;
@@ -2532,7 +2565,7 @@ async function stopRealtime(reason = 'client_stop') {
         // agent_id só como fallback se message_id não disponível
         body: JSON.stringify({
           text: clean,
-          voice: (forceAuto || messageId) ? null : (ttsVoice === "auto" ? null : ttsVoice),
+          voice: voiceOverride ? resolveAgentVoice({ voice_id: voiceOverride }) : ((forceAuto || messageId) ? null : (ttsVoice === "auto" ? null : ttsVoice)),
           speed: 1.0,
           agent_id: messageId ? null : (agentId || null),
           message_id: messageId || null,
