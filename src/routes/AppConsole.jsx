@@ -539,7 +539,6 @@ const rtcLastUserActivityAtRef = useRef(0);
   const rtcFlushTimerRef = useRef(null);
   const rtcLivePollTimerRef = useRef(null);
   const rtcSeenBackendResponseIdsRef = useRef(new Set());
-  const rtcSeenBackendUserIdsRef = useRef(new Set());
   const rtcConnectingRef = useRef(false);
   // PATCH0100_27_2B: UI log + punct status
   const [rtcAuditEvents, setRtcAuditEvents] = useState([]);
@@ -1777,7 +1776,6 @@ function scheduleRealtimeIdleFollowup() {
 
       rtcEventQueueRef.current = [];
       rtcSeenBackendResponseIdsRef.current = new Set();
-      rtcSeenBackendUserIdsRef.current = new Set();
       if (rtcFlushTimerRef.current) { try { clearInterval(rtcFlushTimerRef.current); } catch {} }
       rtcFlushTimerRef.current = setInterval(() => { try { flushRealtimeEvents(); } catch {} }, 400);
       startRealtimeLivePoll();
@@ -2208,44 +2206,6 @@ function scheduleRealtimeIdleFollowup() {
       setRtcAuditEvents(events);
     }
 
-    let consumedAny = false;
-
-    const userEvents = events.filter((ev) => {
-      const eventType = String(ev?.event_type || "").trim();
-      const speakerType = String(ev?.speaker_type || ev?.role || "").trim().toLowerCase();
-      return eventType === "transcript.final" && speakerType === "user";
-    });
-
-    for (const ev of userEvents) {
-      const evId = String(ev?.id || "");
-      if (!evId || rtcSeenBackendUserIdsRef.current.has(evId)) continue;
-
-      const content =
-        String(
-          ev?.transcript_punct ||
-          ev?.transcript_raw ||
-          ev?.content ||
-          ""
-        ).trim();
-
-      if (!content) continue;
-
-      rtcSeenBackendUserIdsRef.current.add(evId);
-      consumedAny = true;
-
-      setMessages((prev) => {
-        const exists = (prev || []).some((m) => String(m?.id || "") === evId);
-        if (exists) return prev;
-        return (prev || []).concat([{
-          id: evId,
-          role: "user",
-          content,
-          user_name: user?.name || user?.email || "Você",
-          created_at: ev?.created_at || Math.floor(Date.now() / 1000),
-        }]);
-      });
-    }
-
     const candidateEvents = events.filter((ev) => {
       const eventType = String(ev?.event_type || "").trim();
       const speakerType = String(ev?.speaker_type || ev?.role || "").trim().toLowerCase();
@@ -2271,7 +2231,6 @@ function scheduleRealtimeIdleFollowup() {
       if (!content) continue;
 
       rtcSeenBackendResponseIdsRef.current.add(evId);
-      consumedAny = true;
 
       const agentName = String(ev?.agent_name || meta?.agent_name || "Orkio").trim() || "Orkio";
       const agentId = ev?.agent_id || ev?.speaker_id || meta?.agent_id || null;
@@ -2290,7 +2249,7 @@ function scheduleRealtimeIdleFollowup() {
           agent_id: agentId ? String(agentId) : null,
           agent_name: agentName,
           voice_id: resolvedVoice,
-          created_at: ev?.created_at || Math.floor(Date.now() / 1000),
+          created_at: Math.floor(Date.now() / 1000),
         }]);
       });
 
@@ -2306,15 +2265,6 @@ function scheduleRealtimeIdleFollowup() {
         });
       } catch (err) {
         console.warn("[Realtime] backend response TTS failed", err);
-      }
-    }
-
-    if (consumedAny) {
-      try {
-        const tid = rtcThreadIdRef.current || threadId;
-        if (tid) await loadMessages(tid);
-      } catch (err) {
-        console.warn("[Realtime] thread sync failed", err);
       }
     }
   }
